@@ -446,8 +446,12 @@ spec:
             - /bin/sh
             - -c
             - |
-              sleep 10
-              mc alias set minio http://minio:9000 minio minio123
+              echo "Waiting for MinIO to be ready..."
+              until mc alias set minio http://minio:9000 minio minio123; do
+                echo "MinIO not ready yet, retrying in 5 seconds..."
+                sleep 5
+              done
+              echo "MinIO is ready, creating buckets..."
               mc mb --ignore-existing minio/insights-upload-perma
               mc mb --ignore-existing minio/insights-upload-rejected
               mc mb --ignore-existing minio/ccx-bucket

@@ -30,13 +30,22 @@ The EDP consists of:
 
 Total: **19 pods**
 
-## Prerequisites
-
-- An OpenShift cluster (4.18+)
-- Cluster admin access
-- `oc` CLI installed and logged in
-
 ## Quick Start
+
+In Cluster Bot: 
+```bash
+launch 4.20 aws,large
+```
+
+Once the cluster is ready:
+
+```bash
+# Log in into the cluster (server URL in kubeconfig)
+oc login -u kubeadmin -p <password> <URL>
+
+# Get the cluster URL or simply use the one Clusterbot gave
+oc whoami --show-console
+```
 
 ### Step 1: Install Strimzi Operator
 
@@ -72,6 +81,16 @@ oc get kafkatopic -n kafka
 # Create namespace
 oc apply -f deploy/00-namespace.yaml
 
+# Configure image pull credentials - testing version
+oc create secret docker-registry quay-pull-secret \
+  --docker-server=quay.io \
+  --docker-username=<your-quay-username> \
+  --docker-password=<your-quay-password> \
+  -n edp-processing
+
+# Link the secret to the default service account
+oc secrets link default quay-pull-secret --for=pull -n edp-processing
+
 # Create secrets
 oc apply -f deploy/01-secrets.yaml
 
@@ -84,10 +103,6 @@ oc wait --for=condition=ready pod -l app=minio -n edp-processing --timeout=300s
 
 # Deploy application services
 oc apply -f deploy/04-application-services.yaml
-
-# Wait for all pods to be ready
-oc wait --for=condition=ready pod --all -n edp-processing --timeout=600s
-```
 
 ### Step 4: Verify Deployment
 
@@ -144,7 +159,7 @@ oc create route edge aggregator \
   --port=8082 \
   -n edp-processing
 
-# Expose smart-proxy (optional, provides enriched API)
+# Expose smart-proxy
 oc create route edge smart-proxy \
   --service=smart-proxy \
   --port=8080 \
@@ -188,7 +203,7 @@ oc logs -n edp-processing deployment/ccx-data-pipeline --tail=50 -f
 oc logs -n edp-processing deployment/db-writer --tail=20 -f
 ```
 
-### Query Results
+### Query Results from Aggregator
 
 ```bash
 # Get the aggregator URL
@@ -199,7 +214,31 @@ CLUSTER_ID="181862b9-c53b-4ea9-ae22-ac4415e2cf21"
 curl -sk "https://$AGGREGATOR_URL/api/v1/organizations/1/clusters/$CLUSTER_ID/reports" | jq
 ```
 
+### Query Results from Smart Proxy
+
+```bash
+# Get the smart-proxy URL
+SMART_PROXY_URL=$(oc get route smart-proxy -n edp-processing -o jsonpath='{.spec.host}')
+
+# Identity header (base64 encoded: {"identity": {"type": "User", "account_number": "0000001", "org_id": "000001", "internal": {"org_id": "000001"}}})
+IDENTITY_HEADER="eyJpZGVudGl0eSI6IHsidHlwZSI6ICJVc2VyIiwgImFjY291bnRfbnVtYmVyIjogIjAwMDAwMDEiLCAib3JnX2lkIjogIjAwMDAwMSIsICJpbnRlcm5hbCI6IHsib3JnX2lkIjogIjAwMDAwMSJ9fX0="
+
+# Query cluster reports with enriched content
+CLUSTER_ID="181862b9-c53b-4ea9-ae22-ac4415e2cf21"
+curl -sk -H "x-rh-identity: $IDENTITY_HEADER" \
+  "https://$SMART_PROXY_URL/api/v1/clusters/$CLUSTER_ID/report" | \
+  jq '.report.data[] | {rule_id, description, total_risk, resolution}'
+```
+
 ## Configuration
+
+### Image Registry Credentials
+
+Before deploying, ensure you have valid credentials for the image registry (quay.io). These are required to pull the EDP service images. You'll need:
+- Quay.io username
+- Quay.io password or robot token
+
+The credentials are configured during Step 3 of the deployment process.
 
 ### Default Credentials (Development Only)
 
@@ -237,29 +276,6 @@ curl -sk "https://$AGGREGATOR_URL/api/v1/organizations/1/clusters/$CLUSTER_ID/re
 - `smart-proxy:8080` - Smart Proxy unified API
 - `content-service:8081` - Content Service API
 
-## Resource Requirements
-
-The full stack requires approximately:
-
-**CPU:**
-- Minimum: ~3.5 cores (requests)
-- Maximum: ~11 cores (limits)
-
-**Memory:**
-- Minimum: ~7.5 GB (requests)
-- Maximum: ~15 GB (limits)
-
-**Storage:**
-- PostgreSQL aggregator: 10Gi
-- PostgreSQL notifications: 5Gi
-- MinIO: 20Gi
-
-**Recommended minimum cluster size:**
-- 3 worker nodes
-- 4 vCPUs per node
-- 16 GB RAM per node
-
-For development/testing on smaller clusters, you can reduce resource requests in the deployment files.
 
 ## Troubleshooting
 
@@ -291,11 +307,17 @@ oc exec -n edp-processing postgresql-0 -- \
 ```
 
 ### MinIO Bucket Issues
-If the minio-create-buckets Job fails:
+The bucket creation job now automatically waits for MinIO to be ready (with retries). If you still encounter issues:
 ```bash
-# Delete and recreate the job
+# Check the job logs
+oc logs -n edp-processing job/minio-create-buckets
+
+# If needed, delete and recreate the job
 oc delete job minio-create-buckets -n edp-processing
 oc apply -f deploy/02-infrastructure.yaml
+
+# Verify buckets were created by checking the logs again
+oc logs -n edp-processing job/minio-create-buckets
 ```
 
 ## Cleanup
@@ -322,32 +344,3 @@ oc delete -f deploy/00-namespace.yaml
 oc delete namespace kafka
 ```
 
-## Architecture
-
-The data flow is:
-
-```
-Upload → Ingress → MinIO → Kafka → ccx-data-pipeline →
-Kafka (results) → db-writer → PostgreSQL → Aggregator REST API
-                                          ↓
-                                       Smart Proxy
-```
-
-## Differences from ACM Addon Approach
-
-This deployment is simpler than the ACM addon approach:
-
-| ACM Addon | Direct Deployment |
-|-----------|-------------------|
-| Requires 2 clusters (hub + managed) | Requires 1 cluster |
-| Requires ACM installation | No ACM needed |
-| Requires placement/import setup | Direct oc apply |
-| Manifests wrapped in AddOnTemplates | Plain Kubernetes YAML |
-| More complex troubleshooting | Simpler to debug |
-
-## Next Steps
-
-- Update credentials in `deploy/01-secrets.yaml` for production use
-- Adjust resource limits based on your cluster capacity
-- Set up proper monitoring and alerting
-- Configure persistent backup for PostgreSQL and MinIO
