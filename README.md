@@ -118,26 +118,35 @@ oc get pods -n kafka
 
 Expected output:
 ```
-NAME                                      READY   STATUS    RESTARTS
-aggregator-xxx                            1/1     Running   0
-cache-writer-xxx                          1/1     Running   0
-ccx-data-pipeline-xxx                     1/1     Running   0
-ccx-upgrades-data-eng-xxx                 1/1     Running   0
-ccx-upgrades-inference-xxx                1/1     Running   0
-content-service-xxx                       1/1     Running   0
-db-writer-xxx                             1/1     Running   0
-dvo-extractor-xxx                         1/1     Running   0
-dvo-writer-xxx                            1/1     Running   0
-ingress-xxx                               1/1     Running   0
-minio-0                                   1/1     Running   0
-minio-create-buckets-xxx                  0/1     Completed 0
-mock-oauth2-server-xxx                    1/1     Running   0
-notification-db-0                         1/1     Running   0
-notification-writer-xxx                   1/1     Running   0
-postgresql-0                              1/1     Running   0
-redis-xxx                                 1/1     Running   0
-rhobs-mock-xxx                            1/1     Running   0
-smart-proxy-xxx                           1/1     Running   0
+> oc get pods -n edp-processing
+
+NAME                                      READY   STATUS      RESTARTS   AGE
+aggregator-6494dc7976-5csd7               1/1     Running     0          104s
+cache-writer-5f4c47497b-ksp55             1/1     Running     0          104s
+ccx-data-pipeline-b465d9bf-m49t4          1/1     Running     0          105s
+ccx-upgrades-data-eng-7685565f99-88rnx    1/1     Running     0          102s
+ccx-upgrades-inference-6f86d86854-rcg6r   1/1     Running     0          101s
+content-service-67cd5f4889-2ccdf          1/1     Running     0          103s
+db-writer-77dd578f6d-qcgv5                1/1     Running     0          105s
+dvo-extractor-558bbf6ddc-scvdk            1/1     Running     0          105s
+dvo-writer-55994d9b5-bclj2                1/1     Running     0          104s
+ingress-67f47c644-9qkjb                   1/1     Running     0          100s
+minio-0                                   1/1     Running     0          2m23s
+minio-create-buckets-cc5xg                0/1     Completed   0          2m22s
+mock-oauth2-server-5bd8bd579-pmbrk        1/1     Running     0          2m24s
+notification-db-0                         1/1     Running     0          2m25s
+notification-writer-5497b7d57d-k4mjx      1/1     Running     0          100s
+postgresql-0                              1/1     Running     0          2m26s
+redis-5f6b544485-wmzbj                    1/1     Running     0          2m25s
+rhobs-mock-85895c697b-ct5b7               1/1     Running     0          2m23s
+smart-proxy-58f8ddffb9-xxwkl              1/1     Running     0          102s
+
+> oc get pods -n kafka
+
+NAME                                         READY   STATUS    RESTARTS   AGE
+edp-kafka-dual-role-0                        1/1     Running   0          4m53s
+edp-kafka-entity-operator-5dc4b5fb54-k5nrl   1/1     Running   0          4m15s
+strimzi-cluster-operator-6c84667cb8-2n9f9    1/1     Running   0          5m59s
 ```
 
 ## Testing the Pipeline
@@ -166,7 +175,9 @@ oc create route edge smart-proxy \
   -n edp-processing
 ```
 
-### Upload Test Archive
+### Option 1: Manual Upload Test Archive
+
+For quick testing, you can manually upload a test archive:
 
 ```bash
 # Setup Python environment (first time only)
@@ -190,17 +201,132 @@ Status Code: 202
 ✅ Archive uploaded successfully!
 ```
 
-### Watch Processing Flow
+### Option 2: Configure Local Insights Pipeline
+
+**Prerequisites:**
+- ACM installed on the cluster
+- `insights-client` deployment running in the `open-cluster-management` namespace
+
+This option configures the full insights pipeline to use your local EDP stack:
+1. **insights-operator** → uploads cluster data to local **ingress:3000**
+2. Processing pipeline → processes the data
+3. **insights-client** → fetches results from local **aggregator:8082**
+
+#### Step 2.1: Configure Ingress to Accept Unauthenticated Uploads
+
+The ingress service requires authentication by default. Disable it for local development:
 
 ```bash
-# Watch ingress receive the upload
+# Disable authentication requirement in ingress
+oc set env deployment/ingress -n edp-processing INGRESS_AUTH=false
+
+# Wait for rollout to complete
+oc rollout status deployment/ingress -n edp-processing
+```
+
+#### Step 2.2: Configure insights-operator to Upload Locally
+
+By default, insights-operator uploads to Red Hat's cloud (`console.redhat.com`). Configure it to use your local ingress instead:
+
+```bash
+# Create a support Secret to override the upload endpoint
+# Note: Must be a Secret (not ConfigMap) and must include full path
+cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: support
+  namespace: openshift-config
+type: Opaque
+stringData:
+  endpoint: "http://ingress.edp-processing.svc.cluster.local:3000/api/ingress/v1/upload"
+EOF
+
+# Restart insights-operator to pick up the new configuration
+oc delete pod -n openshift-insights -l app=insights-operator
+
+# Wait for it to come back up
+oc wait --for=condition=ready pod -l app=insights-operator -n openshift-insights --timeout=120s
+```
+
+**Verify insights-operator configuration:**
+
+```bash
+# Check the configuration is loaded
+oc logs -n openshift-insights deployment/insights-operator --tail=100 | grep -A 15 "Configuration is"
+
+# Expected output should show:
+# uploadEndpoint: http://ingress.edp-processing.svc.cluster.local:3000/api/ingress/v1/upload
+```
+
+**Trigger immediate upload (instead of waiting 2 hours):**
+
+```bash
+# Force insights operator to gather and upload immediately
+oc annotate -n openshift-insights insightsoperator cluster \
+  insightsoperator.openshift.io/gather='{}'
+
+# Watch for upload activity
+oc logs -n openshift-insights deployment/insights-operator -f | grep -i upload
+
+# Expected output:
+# Uploading application/vnd.redhat.openshift.periodic to http://ingress.edp-processing.svc.cluster.local:3000/api/ingress/v1/upload
+# Uploaded report successfully in XXXms
+```
+
+#### Step 2.3: Configure insights-client to Fetch from Local Aggregator
+
+The insights-client needs to fetch processed reports from the aggregator service (not ingress). It appends the cluster path to CCX_SERVER, so we need to include the base API path:
+
+```bash
+# Configure insights-client to use local aggregator
+# Note: insights-client appends "/clusters/{id}/reports" to this URL
+oc set env deployment/insights-client -n open-cluster-management \
+  CCX_SERVER=http://aggregator.edp-processing.svc.cluster.local:8082/api/v1/organizations/1
+
+# Restart the deployment
+oc rollout restart deployment/insights-client -n open-cluster-management
+
+# Wait for the rollout to complete
+oc rollout status deployment/insights-client -n open-cluster-management
+```
+
+**Verify insights-client configuration:**
+
+```bash
+# Check the environment variable is set correctly
+oc exec -n open-cluster-management deployment/insights-client -- env | grep CCX_SERVER
+# Expected output: CCX_SERVER=http://aggregator.edp-processing.svc.cluster.local:8082/api/v1/organizations/1
+
+# Watch the insights-client logs
+oc logs -n open-cluster-management deployment/insights-client -f
+
+# Expected output:
+# Creating Request for cluster local-cluster (...) using Insights URL http://aggregator.edp-processing.svc.cluster.local:8082/api/v1/organizations/1/clusters/.../reports
+```
+
+### Watch the Complete Processing Flow
+
+After configuring both insights-operator and insights-client, watch the data flow through the pipeline:
+
+```bash
+# 1. Watch insights-operator upload archive to ingress
+oc logs -n openshift-insights deployment/insights-operator -f | grep -i upload
+
+# 2. Watch ingress receive the upload and send to Kafka
 oc logs -n edp-processing deployment/ingress --tail=20 -f
 
-# Watch ccx-data-pipeline process rules
+# 3. Watch ccx-data-pipeline consume from Kafka and process rules
 oc logs -n edp-processing deployment/ccx-data-pipeline --tail=50 -f
 
-# Watch db-writer write to PostgreSQL
+# 4. Watch db-writer write results to PostgreSQL
 oc logs -n edp-processing deployment/db-writer --tail=20 -f
+
+# 5. Watch insights-client fetch results from aggregator
+oc logs -n open-cluster-management deployment/insights-client -f
+
+# 6. Check PolicyReports created by insights-client
+oc get policyreports -A
 ```
 
 ### Query Results from Aggregator
@@ -210,7 +336,7 @@ oc logs -n edp-processing deployment/db-writer --tail=20 -f
 AGGREGATOR_URL=$(oc get route aggregator -n edp-processing -o jsonpath='{.spec.host}')
 
 # Query cluster reports (replace with your test cluster ID)
-CLUSTER_ID="181862b9-c53b-4ea9-ae22-ac4415e2cf21"
+CLUSTER_ID="9f1511c6-6ef4-48ef-8fe9-e6dfea7076f0"
 curl -sk "https://$AGGREGATOR_URL/api/v1/organizations/1/clusters/$CLUSTER_ID/reports" | jq
 ```
 
@@ -224,7 +350,7 @@ SMART_PROXY_URL=$(oc get route smart-proxy -n edp-processing -o jsonpath='{.spec
 IDENTITY_HEADER="eyJpZGVudGl0eSI6IHsidHlwZSI6ICJVc2VyIiwgImFjY291bnRfbnVtYmVyIjogIjAwMDAwMDEiLCAib3JnX2lkIjogIjAwMDAwMSIsICJpbnRlcm5hbCI6IHsib3JnX2lkIjogIjAwMDAwMSJ9fX0="
 
 # Query cluster reports with enriched content
-CLUSTER_ID="181862b9-c53b-4ea9-ae22-ac4415e2cf21"
+CLUSTER_ID="9f1511c6-6ef4-48ef-8fe9-e6dfea7076f0"
 curl -sk -H "x-rh-identity: $IDENTITY_HEADER" \
   "https://$SMART_PROXY_URL/api/v1/clusters/$CLUSTER_ID/report" | \
   jq '.report.data[] | {rule_id, description, total_risk, resolution}'
@@ -278,6 +404,59 @@ The credentials are configured during Step 3 of the deployment process.
 
 
 ## Troubleshooting
+
+### Insights Pipeline Issues
+
+**Problem: insights-client getting 404 errors**
+```bash
+# Check insights-client logs for the URL it's using
+oc logs -n open-cluster-management deployment/insights-client --tail=50 | grep "Insights URL"
+
+# Should show: http://aggregator.edp-processing.svc.cluster.local:8082/api/v1/organizations/1/clusters/.../reports
+# If wrong path, fix: Re-run Step 2.3 to configure CCX_SERVER correctly
+```
+
+**Problem: insights-operator still uploading to console.redhat.com**
+```bash
+# Check insights-operator configuration
+oc logs -n openshift-insights deployment/insights-operator --tail=100 | grep -A 15 "Configuration is"
+
+# Should show: uploadEndpoint: http://ingress.edp-processing.svc.cluster.local:3000/api/ingress/v1/upload
+# If it shows console.redhat.com, the support Secret wasn't applied correctly
+
+# Check if the support Secret exists
+oc get secret support -n openshift-config
+
+# Fix: Re-run Step 2.2 to create the support Secret and restart insights-operator
+```
+
+**Problem: ingress rejecting uploads with "missing x-rh-identity header"**
+```bash
+# Check if INGRESS_AUTH is set to false
+oc exec -n edp-processing deployment/ingress -- env | grep INGRESS_AUTH
+# Expected: INGRESS_AUTH=false
+
+# If not set or set to true, fix:
+oc set env deployment/ingress -n edp-processing INGRESS_AUTH=false
+oc rollout status deployment/ingress -n edp-processing
+```
+
+**Problem: No data in aggregator database**
+```bash
+# Check if ingress received any uploads
+oc logs -n edp-processing deployment/ingress --tail=100
+
+# Check if ccx-data-pipeline processed anything
+oc logs -n edp-processing deployment/ccx-data-pipeline --tail=100 | grep -i "cluster"
+
+# Check database directly
+oc exec -n edp-processing postgresql-0 -- \
+  psql -U user -d aggregator -c "SELECT cluster, reported_at FROM report ORDER BY reported_at DESC LIMIT 5;"
+
+# If empty, data isn't flowing through the pipeline
+# Trigger a manual upload:
+oc annotate -n openshift-insights insightsoperator cluster insightsoperator.openshift.io/gather='{}'
+```
 
 ### Check Pod Status
 ```bash
