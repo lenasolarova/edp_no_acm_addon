@@ -203,16 +203,16 @@ Status Code: 202
 
 ### Option 2: Configure Local Insights Pipeline
 
-**Prerequisites:**
-- ACM installed on the cluster
-- `insights-client` deployment running in the `open-cluster-management` namespace
+This option configures the insights pipeline to use your local EDP stack instead of Red Hat's cloud services.
 
-This option configures the full insights pipeline to use your local EDP stack:
+**Basic pipeline** (works on any OpenShift cluster):
 1. **insights-operator** → uploads cluster data to local **ingress:3000**
-2. Processing pipeline → processes the data
-3. **insights-client** → fetches results from local **aggregator:8082**
+2. Processing pipeline → processes the data and stores in database
 
-#### Step 2.1: Ingress Configuration
+**Full pipeline with insights-client** (requires ACM):
+3. **insights-client** → fetches results from local **aggregator:8082** and creates PolicyReports
+
+#### Step 1: Ingress Configuration
 
 The ingress deployment uses a custom on-prem build (`quay.io/rh-ee-lsolarov/insights-ingress:edp-onprem`) that is pre-configured for local deployments:
 
@@ -222,7 +222,7 @@ The ingress deployment uses a custom on-prem build (`quay.io/rh-ee-lsolarov/insi
 
 No manual configuration is needed. The custom build is based on the fork at https://github.com/lenasolarova/insights-ingress-go (branch: `new_image`)
 
-#### Step 2.2: Configure insights-operator to Upload Locally
+#### Step 2: Configure insights-operator to Upload Locally
 
 By default, insights-operator uploads to Red Hat's cloud (`console.redhat.com`). Configure it to use your local ingress instead:
 
@@ -272,9 +272,11 @@ oc logs -n openshift-insights deployment/insights-operator -f | grep -i upload
 # Uploaded report successfully in XXXms
 ```
 
-#### Step 2.3: Configure insights-client to Fetch from Local Aggregator
+#### Step 3: Configure insights-client to Fetch from Local Aggregator (Optional - Requires ACM)
 
-The insights-client needs to fetch processed reports from the aggregator service (not ingress). It appends the cluster path to CCX_SERVER, so we need to include the base API path:
+**Note:** This step is **optional** and requires ACM (Advanced Cluster Management) to be installed. The insights-client deployment runs in the `open-cluster-management` namespace which is created by ACM. Skip this step if you don't have ACM installed.
+
+The insights-client fetches processed reports from the aggregator service and creates PolicyReports in your cluster. It appends the cluster path to CCX_SERVER, so we need to include the base API path:
 
 ```bash
 # Configure insights-client to use local aggregator
@@ -305,7 +307,7 @@ oc logs -n open-cluster-management deployment/insights-client -f
 
 ### Watch the Complete Processing Flow
 
-After configuring both insights-operator and insights-client, watch the data flow through the pipeline:
+After configuring insights-operator (and optionally insights-client), watch the data flow through the pipeline:
 
 ```bash
 # 1. Watch insights-operator upload archive to ingress
@@ -411,7 +413,7 @@ The credentials are configured during Step 3 of the deployment process.
 oc logs -n open-cluster-management deployment/insights-client --tail=50 | grep "Insights URL"
 
 # Should show: http://aggregator.edp-processing.svc.cluster.local:8082/api/v1/organizations/1/clusters/.../reports
-# If wrong path, fix: Re-run Step 2.3 to configure CCX_SERVER correctly
+# If wrong path, fix: Re-run Step 3 to configure CCX_SERVER correctly
 ```
 
 **Problem: insights-operator still uploading to console.redhat.com**
@@ -425,7 +427,7 @@ oc logs -n openshift-insights deployment/insights-operator --tail=100 | grep -A 
 # Check if the support Secret exists
 oc get secret support -n openshift-config
 
-# Fix: Re-run Step 2.2 to create the support Secret and restart insights-operator
+# Fix: Re-run Step 2 to create the support Secret and restart insights-operator
 ```
 
 **Problem: ingress rejecting uploads**
