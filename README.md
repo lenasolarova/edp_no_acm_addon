@@ -15,7 +15,7 @@ The EDP consists of:
 - **RHOBS Mock**: For development/testing observability API
 
 ### Processing Services
-- **ingress**: HTTP endpoint for receiving archive uploads (port 3000)
+- **ingress**: HTTP endpoint for receiving archive uploads (port 3000) - uses custom on-prem build from `quay.io/rh-ee-lsolarov/insights-ingress:edp-onprem`
 - **ccx-data-pipeline**: Processes incoming cluster telemetry data
 - **dvo-extractor**: Extracts DVO (Deployment Validation Operator) insights
 - **db-writer**: Writes OCP recommendations to PostgreSQL
@@ -212,17 +212,15 @@ This option configures the full insights pipeline to use your local EDP stack:
 2. Processing pipeline → processes the data
 3. **insights-client** → fetches results from local **aggregator:8082**
 
-#### Step 2.1: Configure Ingress to Accept Unauthenticated Uploads
+#### Step 2.1: Ingress Configuration
 
-The ingress service requires authentication by default. Disable it for local development:
+The ingress deployment uses a custom on-prem build (`quay.io/rh-ee-lsolarov/insights-ingress:edp-onprem`) that is pre-configured for local deployments:
 
-```bash
-# Disable authentication requirement in ingress
-oc set env deployment/ingress -n edp-processing INGRESS_AUTH=false
+- **Authentication disabled by default** (`INGRESS_AUTH=false`)
+- **Standard test identity** automatically added to messages when no `x-rh-identity` header is present
+- **Kafka broker connection** correctly configured via `INGRESS_KAFKA_BROKERS` environment variable
 
-# Wait for rollout to complete
-oc rollout status deployment/ingress -n edp-processing
-```
+No manual configuration is needed. The custom build is based on the fork at https://github.com/lenasolarova/insights-ingress-go (branch: `new_image`)
 
 #### Step 2.2: Configure insights-operator to Upload Locally
 
@@ -430,15 +428,18 @@ oc get secret support -n openshift-config
 # Fix: Re-run Step 2.2 to create the support Secret and restart insights-operator
 ```
 
-**Problem: ingress rejecting uploads with "missing x-rh-identity header"**
+**Problem: ingress rejecting uploads**
 ```bash
-# Check if INGRESS_AUTH is set to false
-oc exec -n edp-processing deployment/ingress -- env | grep INGRESS_AUTH
-# Expected: INGRESS_AUTH=false
+# Check ingress logs for errors
+oc logs -n edp-processing deployment/ingress --tail=50
 
-# If not set or set to true, fix:
-oc set env deployment/ingress -n edp-processing INGRESS_AUTH=false
-oc rollout status deployment/ingress -n edp-processing
+# Verify the custom on-prem image is being used
+oc get deployment ingress -n edp-processing -o jsonpath='{.spec.template.spec.containers[0].image}'
+# Expected: quay.io/rh-ee-lsolarov/insights-ingress:edp-onprem
+
+# Check environment variables
+oc exec -n edp-processing deployment/ingress -- env | grep INGRESS
+# Expected: INGRESS_AUTH=false, INGRESS_KAFKA_BROKERS=edp-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
 ```
 
 **Problem: No data in aggregator database**
