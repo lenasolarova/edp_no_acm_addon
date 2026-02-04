@@ -1230,7 +1230,7 @@ spec:
     spec:
       containers:
         - name: ingress
-          image: quay.io/cloudservices/insights-ingress:latest
+          image: quay.io/rh-ee-lsolarov/insights-ingress:edp-onprem
           ports:
             - containerPort: 3000
               name: http
