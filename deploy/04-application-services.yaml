@@ -1230,11 +1230,16 @@ spec:
     spec:
       containers:
         - name: ingress
-          image: quay.io/rh-ee-lsolarov/insights-ingress:edp-onprem
+          image: quay.io/cloudservices/insights-ingress:latest
           ports:
             - containerPort: 3000
               name: http
           env:
+            - name: INGRESS_KAFKABROKERS
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-credentials
+                  key: bootstrap-servers
             - name: INGRESS_STAGEBUCKET
               valueFrom:
                 secretKeyRef:
@@ -1271,6 +1276,8 @@ spec:
                 secretKeyRef:
                   name: kafka-credentials
                   key: bootstrap-servers
+            - name: INGRESS_AUTH
+              value: "true"
           resources:
             requests:
               cpu: 100m
