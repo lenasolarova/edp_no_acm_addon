@@ -35,15 +35,16 @@ Total: **20 pods**
 
 The on-prem deployment consists of two main data paths:
 
-**Upload Path** (insights-operator → ingress → Kafka → processing):
-1. insights-operator uploads cluster archives to ingress
-2. Ingress stores archive in MinIO and publishes to Kafka
-3. ccx-data-pipeline processes the archive and extracts recommendations
-4. Writers store results in PostgreSQL and Redis
+**Upload Path** (insights-operator → identity-injector → ingress → Kafka → processing):
+1. insights-operator uploads cluster archives to identity-injector
+2. Identity-injector adds x-rh-identity header with org_id=000001 and forwards to ingress
+3. Ingress stores archive in MinIO and publishes to Kafka
+4. ccx-data-pipeline processes the archive and extracts recommendations
+5. Writers store results in PostgreSQL and Redis
 
 **Query Path** (insights-client → identity-injector → smart-proxy → aggregator):
 1. insights-client requests reports from identity-injector
-2. Identity-injector adds x-rh-identity header with org_id=1
+2. Identity-injector adds x-rh-identity header with org_id=000001 and forwards to smart-proxy
 3. Smart-proxy validates identity and forwards to aggregator
 4. Aggregator queries PostgreSQL and returns results
 
@@ -68,35 +69,53 @@ oc whoami --show-console
 
 ## Automated Setup (Recommended)
 
-Use the provided setup scripts for a streamlined installation:
+Use the provided `edp.sh` script for a streamlined installation:
 
 ```bash
+# Setup Quay credentials first (one-time)
+oc create ns edp-processing
+oc create secret docker-registry quay-pull-secret \
+  --docker-server=quay.io \
+  --docker-username=<your-quay-username> \
+  --docker-password=<your-quay-password> \
+  -n edp-processing
+oc secrets link default quay-pull-secret --for=pull -n edp-processing
+
 # Complete automated setup (all components)
-./setup-all.sh
+./edp.sh all
 
 # Or run components individually:
-./setup-kafka.sh              # Step 1: Kafka cluster
-./setup-databases.sh          # Step 2: PostgreSQL, Redis, MinIO
-./setup-edp-services.sh       # Step 3: Processing services
-./expose-services.sh          # Step 4: Create routes
-./configure-insights.sh       # Step 5: Configure insights-operator
+./edp.sh kafka        # Step 1: Kafka cluster
+./edp.sh databases    # Step 2: PostgreSQL, Redis, MinIO
+./edp.sh services     # Step 3: Processing services and identity-injector
+./edp.sh routes       # Step 4: Create routes
+./edp.sh insights     # Step 5: Configure insights-operator
+
+# Optional: Configure ACM insights-client (requires ACM)
+./edp.sh acm-client
 
 # Verify deployment
-./verify-deployment.sh
+./edp.sh verify
+
+# Verify pipeline is processing archives
+./verify-pipeline.sh
 
 # Clean up everything
-./cleanup-all.sh
+./edp.sh cleanup
 ```
 
-**Available Scripts:**
-- `setup-all.sh` - Complete automated setup (runs all steps)
-- `setup-kafka.sh` - Install Strimzi operator and deploy Kafka cluster
-- `setup-databases.sh` - Deploy PostgreSQL, Redis, MinIO, and mocks
-- `setup-edp-services.sh` - Deploy all EDP processing services
-- `expose-services.sh` - Create OpenShift routes for services
-- `configure-insights.sh` - Configure insights-operator to use local EDP
-- `verify-deployment.sh` - Verify all components are healthy
-- `cleanup-all.sh` - Remove all EDP components
+**Available Commands:**
+- `./edp.sh all` - Complete automated setup (runs all steps)
+- `./edp.sh kafka` - Install Strimzi operator and deploy Kafka cluster
+- `./edp.sh databases` - Deploy PostgreSQL, Redis, MinIO, and mocks
+- `./edp.sh services` - Deploy all EDP processing services and identity-injector
+- `./edp.sh routes` - Create OpenShift routes for services
+- `./edp.sh insights` - Configure insights-operator to use local EDP
+- `./edp.sh acm-client` - Configure ACM insights-client (optional, requires ACM)
+- `./edp.sh verify` - Health check (verify all components are running)
+- `./verify-pipeline.sh` - Verify archive upload and processing
+- `./edp.sh restart` - Restart infrastructure pods
+- `./edp.sh cleanup` - Remove all EDP components
 
 ## Manual Setup (Alternative)
 
@@ -157,7 +176,21 @@ oc wait --for=condition=ready pod -l app=postgresql -n edp-processing --timeout=
 oc wait --for=condition=ready pod -l app=minio -n edp-processing --timeout=300s
 
 # Deploy application services
-oc apply -f deploy/04-application-services.yaml
+oc apply -f deploy/04-ingestion.yaml
+oc apply -f deploy/05-writers.yaml
+oc apply -f deploy/06-api-services.yaml
+oc apply -f deploy/07-upgrades.yaml
+
+# Wait for services to be ready
+oc wait --for=condition=ready pod -l app=ingress -n edp-processing --timeout=300s
+oc wait --for=condition=ready pod -l app=smart-proxy -n edp-processing --timeout=300s
+
+# Deploy identity-injector (requires smart-proxy to exist first)
+oc apply -f deploy/08-identity-injector.yaml
+
+# Wait for identity-injector to be ready
+oc wait --for=condition=ready pod -l app=identity-injector -n edp-processing --timeout=300s
+```
 
 ### Step 4: Verify Deployment
 
@@ -168,7 +201,7 @@ oc get pods -n edp-processing
 # Check Kafka
 oc get pods -n kafka
 
-# You should see all 19 pods in Running state
+# You should see all 20 pods in Running state
 ```
 
 Expected output:
@@ -185,12 +218,11 @@ content-service-67cd5f4889-2ccdf          1/1     Running     0          103s
 db-writer-77dd578f6d-qcgv5                1/1     Running     0          105s
 dvo-extractor-558bbf6ddc-scvdk            1/1     Running     0          105s
 dvo-writer-55994d9b5-bclj2                1/1     Running     0          104s
+identity-injector-59bd48b649-ln2sm        1/1     Running     0          90s
 ingress-67f47c644-9qkjb                   1/1     Running     0          100s
 minio-0                                   1/1     Running     0          2m23s
 minio-create-buckets-cc5xg                0/1     Completed   0          2m22s
 mock-oauth2-server-5bd8bd579-pmbrk        1/1     Running     0          2m24s
-notification-db-0                         1/1     Running     0          2m25s
-notification-writer-5497b7d57d-k4mjx      1/1     Running     0          100s
 postgresql-0                              1/1     Running     0          2m26s
 redis-5f6b544485-wmzbj                    1/1     Running     0          2m25s
 rhobs-mock-85895c697b-ct5b7               1/1     Running     0          2m23s
@@ -267,19 +299,26 @@ This option configures the insights pipeline to use your local EDP stack instead
 **Full pipeline with insights-client** (requires ACM):
 3. **insights-client** → fetches results from **identity-injector:8080** → **smart-proxy:8080** → **aggregator:8082** and creates PolicyReports
 
-#### Step 1: Ingress Configuration
+#### Step 1: Ingress and Identity-Injector Configuration
 
-The ingress deployment uses the standard `quay.io/cloudservices/insights-ingress:latest` image with the following configuration:
+The deployment uses two key components for authentication:
 
-- **Authentication disabled** (`INGRESS_AUTH=false`)
-- **Kafka broker connection** configured via `INGRESS_KAFKABROKERS` environment variable (reads from kafka-credentials secret)
-- **Standard test identity** automatically added to messages when no `x-rh-identity` header is present (built into the standard image when auth is disabled)
+**Identity-Injector** (Nginx proxy):
+- Receives requests from insights-operator and insights-client
+- Adds `x-rh-identity` header with test credentials (org_id: 000001, account: 0000001)
+- Routes uploads to ingress and queries to smart-proxy
+- Acts like 3scale in production environments
+
+**Ingress** (`quay.io/cloudservices/insights-ingress:latest`):
+- **Authentication enabled** (`INGRESS_AUTH=true`) - required to parse x-rh-identity headers
+- **Kafka broker connection** configured via `INGRESS_KAFKABROKERS` environment variable
+- Stores archives in MinIO and publishes messages to Kafka
 
 No manual configuration is needed - the deployment YAML includes all necessary environment variables.
 
 #### Step 2: Configure insights-operator to Upload Locally
 
-By default, insights-operator uploads to Red Hat's cloud (`console.redhat.com`). Configure it to use your local ingress instead:
+By default, insights-operator uploads to Red Hat's cloud (`console.redhat.com`). Configure it to use your local identity-injector instead:
 
 ```bash
 # Create a support Secret to override the upload and query endpoints
@@ -292,7 +331,7 @@ metadata:
   namespace: openshift-config
 type: Opaque
 stringData:
-  endpoint: "http://ingress.edp-processing.svc.cluster.local:3000/api/ingress/v1/upload"
+  endpoint: "http://identity-injector.edp-processing.svc.cluster.local:8080/api/ingress/v1/upload"
   insights-url: "http://identity-injector.edp-processing.svc.cluster.local:8080/api/v2"
 EOF
 
@@ -304,7 +343,7 @@ oc wait --for=condition=ready pod -l app=insights-operator -n openshift-insights
 ```
 
 **What these settings do:**
-- `endpoint`: Where insights-operator **uploads** cluster archives (ingress service)
+- `endpoint`: Where insights-operator **uploads** cluster archives (identity-injector → ingress)
 - `insights-url`: Where insights-operator **queries** for reports (identity-injector → smart-proxy)
 
 **Verify insights-operator configuration:**
@@ -314,7 +353,7 @@ oc wait --for=condition=ready pod -l app=insights-operator -n openshift-insights
 oc logs -n openshift-insights deployment/insights-operator --tail=100 | grep -A 15 "Configuration is"
 
 # Expected output should show:
-# uploadEndpoint: http://ingress.edp-processing.svc.cluster.local:3000/api/ingress/v1/upload
+# uploadEndpoint: http://identity-injector.edp-processing.svc.cluster.local:8080/api/ingress/v1/upload
 ```
 
 **Understanding Collection Schedule:**
@@ -335,7 +374,7 @@ oc logs -n openshift-insights deployment/insights-operator -f | grep -E "Running
 
 # Expected output:
 # Running clusterconfig gatherer
-# Uploading application/vnd.redhat.openshift.periodic to http://ingress.edp-processing.svc.cluster.local:3000/api/ingress/v1/upload
+# Uploading application/vnd.redhat.openshift.periodic to http://identity-injector.edp-processing.svc.cluster.local:8080/api/ingress/v1/upload
 # Uploaded report successfully in XXXms
 ```
 
@@ -344,6 +383,21 @@ oc logs -n openshift-insights deployment/insights-operator -f | grep -E "Running
 ```bash
 oc get insightsoperator cluster -o jsonpath='{.status.gatherStatus.lastGatherTime}' && echo
 ```
+
+**Verify archive is being processed:**
+
+After insights-operator uploads an archive, verify it flows through the pipeline:
+
+```bash
+# Run the pipeline verification script
+./verify-pipeline.sh
+```
+
+This will check:
+- Insights-operator upload status
+- Ingress received the payload
+- Archive processing and storage
+- ACM insights-client queries (if ACM is installed)
 
 #### Step 3: Configure insights-client to Fetch from Local Stack (Optional - Requires ACM)
 
@@ -384,26 +438,37 @@ oc logs -n open-cluster-management deployment/insights-client -f
 After configuring insights-operator (and optionally insights-client), watch the data flow through the pipeline:
 
 ```bash
-# 1. Watch insights-operator upload archive to ingress
+# 1. Watch insights-operator upload archive to identity-injector
 oc logs -n openshift-insights deployment/insights-operator -f | grep -i upload
 
-# 2. Watch ingress receive the upload and send to Kafka
+# 2. Watch identity-injector proxy to ingress
+oc logs -n edp-processing deployment/identity-injector --tail=20 -f
+
+# 3. Watch ingress receive the upload and send to Kafka
 oc logs -n edp-processing deployment/ingress --tail=20 -f
 
-# 3. Watch ccx-data-pipeline consume from Kafka and process rules
+# 4. Watch ccx-data-pipeline consume from Kafka and process rules
 oc logs -n edp-processing deployment/ccx-data-pipeline --tail=50 -f
 
-# 4. Watch db-writer write results to PostgreSQL
+# 5. Watch db-writer write results to PostgreSQL
 oc logs -n edp-processing deployment/db-writer --tail=20 -f
 
-# 5. Watch insights-client fetch results via identity-injector
+# 6. Watch insights-client fetch results via identity-injector
 oc logs -n open-cluster-management deployment/insights-client -f
 
-# 6. Check PolicyReports created by insights-client
+# 7. Check PolicyReports created by insights-client
 oc get policyreports -A
 ```
 
 ### Verify the Pipeline is Working
+
+**Quick verification using the script:**
+
+```bash
+./verify-pipeline.sh
+```
+
+**Manual verification:**
 
 Even if your cluster has 0 recommendations (healthy cluster), you can verify the pipeline is processing data:
 
@@ -511,7 +576,11 @@ To remove the entire EDP stack:
 
 ```bash
 # Delete application services
-oc delete -f deploy/04-application-services.yaml
+oc delete -f deploy/08-identity-injector.yaml
+oc delete -f deploy/07-upgrades.yaml
+oc delete -f deploy/06-api-services.yaml
+oc delete -f deploy/05-writers.yaml
+oc delete -f deploy/04-ingestion.yaml
 
 # Delete infrastructure
 oc delete -f deploy/02-infrastructure.yaml
